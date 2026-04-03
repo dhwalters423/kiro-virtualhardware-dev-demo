@@ -1,0 +1,7 @@
+{
+  "camera_device": "/dev/video0",
+  "confidence_threshold": 0.2,
+  "web_port": 8080,
+  "target_description": "car",
+  "model_path": "yoloe-11s-seg.pt"
+}
