@@ -1,6 +1,5 @@
 ultralytics
-opencv-python-headless
-flask
+opencv-python
 pytest
 hypothesis
 pytest-json-report

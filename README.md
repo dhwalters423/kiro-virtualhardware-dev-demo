@@ -1,6 +1,6 @@
 # Pi Security Cam
 
-A YOLOE-based security camera application for Raspberry Pi that detects a "knight in armor" using text-prompted zero-shot detection and streams annotated video via a web interface.
+A YOLOE-based security camera application for Raspberry Pi that detects a "knight in armor" using text-prompted zero-shot detection and displays annotated video in a native OpenCV window.
 
 ## Prerequisites
 
@@ -36,7 +36,6 @@ cp .env.example .env
 {
   "camera_device": 0,
   "confidence_threshold": 0.3,
-  "web_port": 8080,
   "target_description": "knight in armor",
   "model_path": "yoloe-11s-seg.pt"
 }
@@ -62,4 +61,4 @@ Then open `test-reporter/index.html` in a browser to view results.
 python -m src.main --config config.json
 ```
 
-Open `http://localhost:8080` in a browser to view the live feed.
+The application opens a native OpenCV window titled "Pi Security Cam" showing the live annotated feed. Press `q` to quit.

@@ -5,11 +5,10 @@ from __future__ import annotations
 import logging
 import signal
 import sys
-import webbrowser
 
-from src.config import AppConfig, ConfigValidationError, load_config
+from src.config import ConfigValidationError, load_config
+from src.display import DisplayWindow
 from src.pipeline import FramePipeline
-from src.web import create_app
 
 logging.basicConfig(
     level=logging.INFO,
@@ -19,7 +18,7 @@ logger = logging.getLogger(__name__)
 
 
 def main() -> None:
-    """Parse config, start the pipeline, and run the Flask server."""
+    """Parse config, initialize display and pipeline, and run the main loop."""
     try:
         config = load_config()
     except ConfigValidationError as exc:
@@ -32,22 +31,20 @@ def main() -> None:
         logger.error("Failed to load configuration: %s", exc)
         sys.exit(1)
 
-    pipeline = FramePipeline(config)
-    app = create_app(pipeline, config)
+    display = DisplayWindow(config.target_description)
+    pipeline = FramePipeline(config, display)
 
     def _shutdown(signum, frame):
         logger.info("Received signal %s, shutting down...", signum)
         pipeline.stop()
-        sys.exit(0)
 
     signal.signal(signal.SIGINT, _shutdown)
     signal.signal(signal.SIGTERM, _shutdown)
 
-    pipeline.start()
-    url = f"http://localhost:{config.web_port}"
-    logger.info("Starting web server on port %d", config.web_port)
-    webbrowser.open(url)
-    app.run(host="0.0.0.0", port=config.web_port, threaded=True)
+    try:
+        pipeline.start()
+    finally:
+        display.close()
 
 
 if __name__ == "__main__":

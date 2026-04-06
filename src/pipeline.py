@@ -1,9 +1,12 @@
-"""Frame pipeline — orchestrates capture, detection, annotation, and JPEG encoding."""
+"""Frame pipeline — orchestrates capture, detection, annotation, and display.
+
+The pipeline runs in the main thread (required by OpenCV GUI) and wires
+together the Detector, Annotator, and DisplayWindow components.
+"""
 
 from __future__ import annotations
 
 import logging
-import threading
 import time
 from typing import Optional
 
@@ -13,6 +16,7 @@ import numpy as np
 from src.annotator import FrameAnnotator
 from src.config import AppConfig
 from src.detector import YOLOEDetector
+from src.display import DisplayWindow
 
 logger = logging.getLogger(__name__)
 
@@ -20,115 +24,104 @@ _CAMERA_RETRY_INTERVAL = 5  # seconds
 
 
 class FramePipeline:
-    """End-to-end processing chain: capture → detect → annotate → encode JPEG.
+    """End-to-end processing chain: capture → detect → annotate → display.
 
-    The pipeline runs in a background thread so the Flask server can serve
-    frames concurrently.
+    The pipeline runs in the main thread so that OpenCV GUI calls
+    (imshow / waitKey) work correctly.
     """
 
-    def __init__(self, config: AppConfig) -> None:
+    def __init__(self, config: AppConfig, display: DisplayWindow) -> None:
         self._config = config
+        self._display = display
         self._detector = YOLOEDetector(
             model_path=config.model_path,
             text_prompt=config.target_description,
             confidence_threshold=config.confidence_threshold,
         )
         self._annotator = FrameAnnotator()
-        self._latest_frame: Optional[bytes] = None
-        self._lock = threading.Lock()
         self._running = False
-        self._thread: Optional[threading.Thread] = None
-        self._camera_active = False
-
-    @property
-    def camera_active(self) -> bool:
-        """Whether the camera is currently providing frames."""
-        return self._camera_active
-
-    def get_latest_frame(self) -> Optional[bytes]:
-        """Return the latest JPEG-encoded annotated frame, or None."""
-        with self._lock:
-            return self._latest_frame
+        self._cap: Optional[cv2.VideoCapture] = None
+        self._frame_count = 0
+        self._last_detections: list = []
 
     def start(self) -> None:
-        """Start the capture/processing loop in a background thread."""
-        if self._running:
-            return
+        """Run the camera capture, processing, and display loop.
+
+        This method blocks until the user presses 'q' or stop() is called.
+        It runs in the main thread as required by OpenCV's GUI.
+        """
         self._running = True
-        self._thread = threading.Thread(target=self._run, daemon=True)
-        self._thread.start()
         logger.info("Frame pipeline started")
 
-    def stop(self) -> None:
-        """Stop the pipeline and release resources."""
-        self._running = False
-        if self._thread is not None:
-            self._thread.join(timeout=10)
-            self._thread = None
-        logger.info("Frame pipeline stopped")
+        try:
+            while self._running:
+                # Attempt to open camera if not connected
+                if self._cap is None or not self._cap.isOpened():
+                    self._cap = self._open_camera()
+                    if self._cap is None:
+                        self._display.show_offline()
+                        if self._display.check_quit():
+                            break
+                        time.sleep(_CAMERA_RETRY_INTERVAL)
+                        continue
 
-    def _open_camera(self) -> Optional[cv2.VideoCapture]:
-        """Try to open the camera device, return None on failure."""
-        source = self._config.camera_source
-        logger.info("Attempting to open camera: %s", source)
-        cap = cv2.VideoCapture(source)
-        if cap.isOpened():
-            logger.info("Camera opened successfully: %s", source)
-            return cap
-        cap.release()
-        logger.warning("Camera %s failed, trying fallback devices...", source)
-
-        # Try common video devices as fallback
-        for fallback in ["/dev/video0", "/dev/video1", 0, 1]:
-            if str(fallback) == str(source):
-                continue
-            logger.info("Trying fallback camera: %s", fallback)
-            cap = cv2.VideoCapture(fallback)
-            if cap.isOpened():
-                logger.info("Camera opened on fallback: %s", fallback)
-                return cap
-            cap.release()
-
-        logger.error("No camera device available")
-        return None
-
-    def _run(self) -> None:
-        """Main processing loop — runs in a background thread."""
-        cap: Optional[cv2.VideoCapture] = None
-
-        while self._running:
-            # Attempt to open camera if not connected
-            if cap is None or not cap.isOpened():
-                self._camera_active = False
-                cap = self._open_camera()
-                if cap is None:
+                ret, frame = self._cap.read()
+                if not ret:
+                    logger.error("Failed to read frame, reconnecting...")
+                    self._cap.release()
+                    self._cap = None
+                    self._display.show_offline()
+                    if self._display.check_quit():
+                        break
                     time.sleep(_CAMERA_RETRY_INTERVAL)
                     continue
 
-            ret, frame = cap.read()
-            if not ret:
-                logger.error("Failed to read frame, reconnecting...")
-                cap.release()
-                cap = None
-                self._camera_active = False
-                time.sleep(_CAMERA_RETRY_INTERVAL)
-                continue
+                annotated = self._process_frame(frame)
+                self._display.show_frame(annotated)
 
-            self._camera_active = True
-            annotated = self._process_frame(frame)
+                if self._display.check_quit():
+                    break
+        finally:
+            self._release_camera()
+            self._running = False
+            logger.info("Frame pipeline stopped")
 
-            # Encode to JPEG
-            ok, buf = cv2.imencode(".jpg", annotated)
-            if ok:
-                with self._lock:
-                    self._latest_frame = buf.tobytes()
-
-        # Cleanup
-        if cap is not None:
-            cap.release()
-        self._camera_active = False
+    def stop(self) -> None:
+        """Signal the pipeline loop to exit and release resources."""
+        self._running = False
 
     def _process_frame(self, frame: np.ndarray) -> np.ndarray:
-        """Run detection and annotation on a single frame."""
-        detections = self._detector.detect(frame)
-        return self._annotator.annotate(frame, detections)
+        """Downscale, detect (with frame skipping), and annotate a single frame."""
+        h, w = frame.shape[:2]
+        target_w = self._config.capture_width
+        target_h = self._config.capture_height
+        if w != target_w or h != target_h:
+            frame = cv2.resize(frame, (target_w, target_h), interpolation=cv2.INTER_AREA)
+
+        self._frame_count += 1
+        if self._frame_count % self._config.detect_every_n_frames == 0:
+            self._last_detections = self._detector.detect(frame)
+
+        return self._annotator.annotate(frame, self._last_detections)
+
+    def _open_camera(self) -> Optional[cv2.VideoCapture]:
+        """Try to open the camera device, return None on failure."""
+        device = self._config.camera_device
+        logger.info("Attempting to open camera device: %s", device)
+        cap = cv2.VideoCapture(device)
+        if cap.isOpened():
+            cap.set(cv2.CAP_PROP_FRAME_WIDTH, self._config.capture_width)
+            cap.set(cv2.CAP_PROP_FRAME_HEIGHT, self._config.capture_height)
+            actual_w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+            actual_h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+            logger.info("Camera opened successfully: %s (%dx%d)", device, actual_w, actual_h)
+            return cap
+        cap.release()
+        logger.error("Camera device %s unavailable", device)
+        return None
+
+    def _release_camera(self) -> None:
+        """Release the camera if it is open."""
+        if self._cap is not None:
+            self._cap.release()
+            self._cap = None

@@ -58,10 +58,14 @@ echo "==> Opening SSH connection (you may be prompted for a password once)..."
 # --- Open master connection ---
 run_ssh "echo 'Connected to Pi'"
 
-# --- Kill any existing instance ---
+# --- Stop any existing instance ---
 echo "==> Stopping existing instance"
-run_ssh "kill \$(lsof -t -i:8080) 2>/dev/null || true"
+run_ssh 'bash -s' << 'KILL_SCRIPT'
+for pid in $(ps aux | grep "[p]ython.*src.main" | awk "{print \$2}"); do
+    kill "$pid" 2>/dev/null
+done
 sleep 2
+KILL_SCRIPT
 
 # --- Clean old files ---
 echo "==> Cleaning old files on Pi"
@@ -77,13 +81,19 @@ run_scp -r \
     "$PROJECT_DIR/pytest.ini" \
     "$PI_USER@$PI_HOST:$REMOTE_DIR/"
 
-# --- Install dependencies ---
+# --- Ensure OpenCV with GUI/GTK support ---
+echo "==> Ensuring system OpenCV with GTK support..."
+run_ssh "sudo apt-get update && sudo apt-get install -y python3-opencv"
+# Remove pip opencv-python so the system package (with GTK) takes priority
+run_ssh "pip uninstall -y opencv-python opencv-python-headless 2>/dev/null || true"
+
+# --- Install remaining Python dependencies (skip opencv-python) ---
 echo "==> Installing Python dependencies on Pi"
-run_ssh "cd $REMOTE_DIR && pip install -r requirements.txt"
+run_ssh "cd $REMOTE_DIR && pip install ultralytics pytest hypothesis pytest-json-report"
 
 # --- Start application as background process ---
 echo "==> Starting application on Pi (backgrounding)..."
-run_ssh "nohup bash -c 'cd ~/pi-security-cam && python -m src.main --config config.json > app.log 2>&1' &" &
+run_ssh "nohup bash -c 'cd ~/pi-security-cam && DISPLAY=:0 python -m src.main --config config.json > app.log 2>&1 & echo \$! > app.pid' &" &
 sleep 5
 
 # --- Show startup log ---
@@ -92,10 +102,6 @@ run_ssh "head -20 ~/pi-security-cam/app.log 2>/dev/null || echo 'No log yet'"
 
 # --- Verify it's running ---
 echo "==> Verifying application is running..."
-run_ssh "pgrep -f 'src.main' > /dev/null && echo 'App is running on port 8080' || echo 'WARNING: App is not running'"
+run_ssh "pgrep -f 'src.main' > /dev/null && echo 'App is running' || echo 'WARNING: App is not running'"
 
 echo "==> Deployment complete."
-
-# --- Open browser on the Pi ---
-echo "==> Opening browser on Pi..."
-run_ssh "DISPLAY=:0 nohup xdg-open http://localhost:8080 >/dev/null 2>&1 &"

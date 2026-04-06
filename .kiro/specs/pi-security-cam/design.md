@@ -2,17 +2,17 @@
 
 ## Overview
 
-This system is a headless Python security camera application running on a virtualized Raspberry Pi 4 (ARM Virtual Hardware / Corellium backed by AWS Graviton). It uses YOLOE (YOLO with Embeddings) for text-prompted zero-shot object detection to identify a "knight in armor" in a live USB webcam feed. Detected knights are highlighted with bounding boxes on an MJPEG video stream served via a lightweight Flask web server on the Pi. The entire project is a cloneable GitHub repository with SSH-based deployment scripts. Tests run on-device and report results to a local HTML5 dashboard.
+This system is a Python security camera application running on a virtualized Raspberry Pi 4 (ARM Virtual Hardware / Corellium backed by AWS Graviton). It uses YOLOE (YOLO with Embeddings) for text-prompted zero-shot object detection to identify a "knight in armor" in a live USB webcam feed. Detected knights are highlighted with bounding boxes and the target description is rendered as a text overlay on the video frame, displayed in a native OpenCV window (`cv2.imshow`) running directly on the Pi. The entire project is a cloneable GitHub repository with SSH-based deployment scripts. Tests run on-device and report results to a local HTML5 dashboard.
 
 ### Key Design Decisions
 
 1. **YOLOE over two-stage detection**: A single YOLOE model handles both detection and classification via text prompt, eliminating the need for a separate classifier. The `yoloe-11s-seg.pt` (small) model balances accuracy and performance on ARM.
 
-2. **Flask + MJPEG over WebRTC/HLS**: MJPEG streaming via Flask is the simplest approach for a demo — no transcoding, no JavaScript complexity, works in any browser. Latency is acceptable for a security camera use case.
+2. **Native OpenCV display (`cv2.imshow`) over Flask/MJPEG**: Using `cv2.imshow` for the display window is the lightest-weight approach — no extra dependencies beyond OpenCV (already required for capture and annotation), no web server overhead, and it's the standard pattern for OpenCV camera applications on the Pi. Keyboard input is handled natively via `cv2.waitKey`.
 
 3. **pytest + JSON reporting**: Tests run on the Pi using pytest with `pytest-json-report` to produce machine-readable results. Results are SCP'd back to the dev machine and rendered by a static HTML5 page.
 
-4. **Configuration via JSON + .env**: Application config (thresholds, prompts, ports) lives in a JSON file. SSH credentials live in `.env` (gitignored) with a `.env.example` template.
+4. **Configuration via JSON + .env**: Application config (thresholds, prompts) lives in a JSON file. SSH credentials live in `.env` (gitignored) with a `.env.example` template.
 
 ## Architecture
 
@@ -22,7 +22,7 @@ graph TB
         CAM[USB Camera] --> FP[Frame Pipeline]
         FP --> DET[YOLOE Detector]
         DET --> ANN[Frame Annotator]
-        ANN --> WV[Web View / Flask MJPEG Server]
+        ANN --> DW[Display Window - cv2.imshow]
         CFG[config.json] --> FP
         FP --> LOG[Console Logger]
     end
@@ -34,8 +34,7 @@ graph TB
         PI_TEST -->|SCP results.json| TR[Test Reporter HTML5]
     end
 
-    WV -->|HTTP :8080| BROWSER[Browser]
-    TR -->|file://| BROWSER2[Browser]
+    TR -->|file://| BROWSER[Browser]
 ```
 
 ### Data Flow
@@ -43,14 +42,13 @@ graph TB
 1. **Frame Capture**: OpenCV `VideoCapture` reads frames from the USB camera device
 2. **Detection**: Each frame is passed to YOLOE with the configured text prompt
 3. **Annotation**: Detections above the confidence threshold get bounding boxes drawn via OpenCV
-4. **Streaming**: Annotated frames are JPEG-encoded and served as an MJPEG stream
-5. **Web View**: Flask serves an HTML page with the target description and embedded MJPEG `<img>` tag
+4. **Display**: Annotated frames have the target description overlaid via `cv2.putText` and are shown in a native OpenCV window via `cv2.imshow`
 
 ## Components and Interfaces
 
 ### 1. Frame Pipeline (`pipeline.py`)
 
-The main orchestrator that ties together camera capture, detection, annotation, and streaming.
+The main orchestrator that ties together camera capture, detection, annotation, and display.
 
 ```python
 class FramePipeline:
@@ -58,17 +56,16 @@ class FramePipeline:
         """Initialize pipeline with configuration."""
 
     def start(self) -> None:
-        """Start the camera capture and processing loop."""
+        """Start the camera capture, processing, and display loop."""
 
     def stop(self) -> None:
         """Stop the pipeline and release resources."""
 
-    def get_latest_frame(self) -> Optional[bytes]:
-        """Return the latest JPEG-encoded annotated frame."""
-
     def _process_frame(self, frame: np.ndarray) -> np.ndarray:
         """Run detection and annotation on a single frame."""
 ```
+
+The pipeline runs in the main thread (required by OpenCV's GUI). Each iteration: capture → detect → annotate → overlay target description → `cv2.imshow` → `cv2.waitKey`.
 
 ### 2. Detector (`detector.py`)
 
@@ -101,24 +98,35 @@ class FrameAnnotator:
         """Draw bounding boxes and labels on the frame for each detection."""
 ```
 
-### 4. Web View (`web.py`)
+### 4. Display Window (`display.py`)
 
-Flask application serving the MJPEG stream and status page.
+Native OpenCV display module that shows annotated frames with a target description overlay.
 
 ```python
-def create_app(pipeline: FramePipeline, config: AppConfig) -> Flask:
-    """Create Flask app with MJPEG streaming and status page."""
+class DisplayWindow:
+    WINDOW_TITLE = "Pi Security Cam"
 
-    # Routes:
-    # GET /           -> HTML page with target description + embedded MJPEG stream
-    # GET /video_feed -> MJPEG stream (multipart/x-mixed-replace)
-    # GET /status     -> JSON status (camera active, target description, uptime)
+    def __init__(self, target_description: str):
+        """Create the named OpenCV window."""
+
+    def show_frame(self, frame: np.ndarray) -> None:
+        """Overlay target description text via cv2.putText and display via cv2.imshow."""
+
+    def show_offline(self) -> None:
+        """Display a black placeholder frame with 'Camera Offline' text."""
+
+    def check_quit(self) -> bool:
+        """Process cv2.waitKey and return True if 'q' was pressed."""
+
+    def close(self) -> None:
+        """Destroy the OpenCV window."""
 ```
 
-The HTML page served at `/` will display:
-- The target description text (e.g., "Looking for: Knight in Armor")
-- An `<img>` tag with `src="/video_feed"` for the live MJPEG stream
-- A "Camera Offline" placeholder when no feed is available
+The display window:
+- Opens a native OpenCV window titled "Pi Security Cam" via `cv2.namedWindow`
+- Renders the target description as a text overlay (e.g., "Looking for: Knight in Armor") on each frame via `cv2.putText`
+- Handles keyboard input via `cv2.waitKey`, exiting when "q" is pressed
+- Shows a black placeholder frame with "Camera Offline" text when no feed is available
 
 ### 5. Configuration (`config.py`)
 
@@ -129,7 +137,6 @@ Dataclass-based configuration with JSON serialization.
 class AppConfig:
     camera_device: int = 0
     confidence_threshold: float = 0.3
-    web_port: int = 8080
     target_description: str = "knight in armor"
     model_path: str = "yoloe-11s-seg.pt"
 
@@ -183,7 +190,6 @@ A single static HTML5 page that:
 |-------|------|---------|-------------|
 | camera_device | int | 0 | USB camera device index |
 | confidence_threshold | float | 0.3 | Minimum detection confidence |
-| web_port | int | 8080 | Flask server port |
 | target_description | str | "knight in armor" | Text prompt for YOLOE |
 | model_path | str | "yoloe-11s-seg.pt" | Path to YOLOE model file |
 
@@ -227,21 +233,21 @@ A single static HTML5 page that:
 
 **Validates: Requirements 3.4**
 
-### Property 4: Web view contains target description
+### Property 4: Display window shows target description
 
-*For any* non-empty target description string, the HTML page served by the Web_View should contain that exact target description string in its body.
+*For any* non-empty target description string and *for any* valid video frame, rendering the target description overlay via `cv2.putText` should modify the frame such that the output frame differs from the input frame (text pixels are drawn onto the frame).
 
 **Validates: Requirements 4.2**
 
 ### Property 5: Configuration round-trip
 
-*For any* valid AppConfig object (with valid camera_device >= 0, 0.0 < confidence_threshold <= 1.0, 1 <= web_port <= 65535, non-empty target_description, and non-empty model_path), serializing to JSON and then deserializing back should produce an equivalent AppConfig object.
+*For any* valid AppConfig object (with valid camera_device >= 0, 0.0 < confidence_threshold <= 1.0, non-empty target_description, and non-empty model_path), serializing to JSON and then deserializing back should produce an equivalent AppConfig object.
 
 **Validates: Requirements 9.3**
 
 ### Property 6: Invalid configuration rejection
 
-*For any* configuration dictionary containing at least one invalid value (negative camera_device, confidence_threshold outside (0, 1], web_port outside [1, 65535], empty target_description, or empty model_path), loading the configuration should raise a validation error.
+*For any* configuration dictionary containing at least one invalid value (negative camera_device, confidence_threshold outside (0, 1], empty target_description, or empty model_path), loading the configuration should raise a validation error.
 
 **Validates: Requirements 5.4**
 
@@ -256,12 +262,11 @@ A single static HTML5 page that:
 | Error Condition | Component | Behavior |
 |----------------|-----------|----------|
 | Camera unavailable | Frame_Pipeline | Log error, retry every 5 seconds |
-| Camera disconnects mid-stream | Frame_Pipeline | Log error, attempt reconnection, serve "offline" placeholder via Web_View |
+| Camera disconnects mid-stream | Frame_Pipeline | Log error, attempt reconnection, show "Camera Offline" placeholder in native display window |
 | YOLOE model file not found | Detector | Log error, exit with non-zero status |
 | YOLOE inference failure | Detector | Log error, skip frame, continue to next |
 | Invalid config JSON | AppConfig | Log validation error, exit with non-zero status |
 | Missing config file | AppConfig | Use default values for all parameters |
-| Web server port in use | Web_View | Log error, exit with non-zero status |
 | SSH connection failure | deploy.sh | Print error message, exit with non-zero status |
 | .env file missing | deploy.sh / test.sh | Print error message directing user to .env.example |
 
@@ -298,7 +303,7 @@ tests/
 ├── test_config.py          # Config round-trip (Property 5), invalid config (Property 6)
 ├── test_detector.py        # Confidence filtering (Property 1)
 ├── test_annotator.py       # Annotation completeness (Property 2), no-detection passthrough (Property 3)
-├── test_web.py             # Web view target description (Property 4)
+├── test_display.py         # Display window target description overlay (Property 4)
 └── test_reporter.py        # Test results parsing (Property 7)
 ```
 

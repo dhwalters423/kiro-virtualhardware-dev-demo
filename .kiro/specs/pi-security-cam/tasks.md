@@ -2,27 +2,27 @@
 
 ## Overview
 
-Incremental implementation of a YOLOE-based security camera application for Raspberry Pi. Tasks build sequentially from core data models through detection, annotation, web streaming, deployment scripts, and test reporting. Python with pytest + Hypothesis for testing.
+Incremental implementation of a YOLOE-based security camera application for Raspberry Pi. Tasks build sequentially from core data models through detection, annotation, native OpenCV display, deployment scripts, and test reporting. Python with pytest + Hypothesis for testing.
 
 ## Tasks
 
 - [x] 1. Set up project structure and configuration
   - [x] 1.1 Create project directory structure, `requirements.txt`, `.gitignore`, `.env.example`, and `README.md`
-    - Create `src/` directory with `__init__.py`, `config.py`, `detector.py`, `annotator.py`, `pipeline.py`, `web.py`, `main.py`
+    - Create `src/` directory with `__init__.py`, `config.py`, `detector.py`, `annotator.py`, `pipeline.py`, `display.py`, `main.py`
     - Create `tests/` directory with `__init__.py`, `conftest.py`
     - Create `scripts/deploy.sh`, `scripts/test.sh`
     - Create `test-reporter/index.html`
     - Create `config.json` with default values
-    - `requirements.txt`: ultralytics, opencv-python-headless, flask, pytest, hypothesis, pytest-json-report
+    - `requirements.txt`: ultralytics, opencv-python, pytest, hypothesis, pytest-json-report
     - `.env.example` with `PI_HOST`, `PI_PASSWORD`, `PI_SSH_KEY` placeholders
     - `.gitignore` with `.env`, `__pycache__`, `*.pyc`, `results.json`
     - `README.md` with setup instructions
     - _Requirements: 8.1, 8.2, 8.3, 8.4_
 
   - [x] 1.2 Implement `AppConfig` dataclass with JSON serialization/deserialization and validation
-    - Define `AppConfig` dataclass in `src/config.py` with fields: `camera_device`, `confidence_threshold`, `web_port`, `target_description`, `model_path`
+    - Define `AppConfig` dataclass in `src/config.py` with fields: `camera_device`, `confidence_threshold`, `target_description`, `model_path`
     - Implement `from_json()`, `to_json()`, `to_dict()`, `from_dict()` methods
-    - Implement validation: camera_device >= 0, 0 < confidence_threshold <= 1.0, 1 <= web_port <= 65535, non-empty target_description, non-empty model_path
+    - Implement validation: camera_device >= 0, 0 < confidence_threshold <= 1.0, non-empty target_description, non-empty model_path
     - Implement CLI argument parsing for config file path with defaults
     - _Requirements: 5.1, 5.2, 5.3, 5.4, 9.1, 9.2, 9.3_
 
@@ -60,32 +60,35 @@ Incremental implementation of a YOLOE-based security camera application for Rasp
 - [x] 3. Checkpoint - Ensure all tests pass
   - Ensure all tests pass, ask the user if questions arise.
 
-- [x] 4. Implement web view and frame pipeline
-  - [x] 4.1 Implement Flask web server with MJPEG streaming
-    - Implement `create_app()` factory function
-    - Implement `/` route serving HTML page with target description and `<img src="/video_feed">`
-    - Implement `/video_feed` route with MJPEG multipart streaming
-    - Implement `/status` route returning JSON status
-    - Handle camera-offline placeholder
+- [x] 4. Implement display window and frame pipeline
+  - [x] 4.1 Implement `DisplayWindow` with native OpenCV display
+    - Implement `DisplayWindow` class in `src/display.py`
+    - Use `cv2.namedWindow` to create window titled "Pi Security Cam"
+    - Implement `show_frame()` with `cv2.putText` for target description overlay (e.g., "Looking for: Knight in Armor") and `cv2.imshow`
+    - Implement `show_offline()` for black placeholder frame with "Camera Offline" text
+    - Implement `check_quit()` using `cv2.waitKey` for 'q' key exit
+    - Implement `close()` to destroy the OpenCV window
     - _Requirements: 4.1, 4.2, 4.3, 4.4, 4.5_
 
-  - [ ]* 4.2 Write property test for web view target description
-    - **Property 4: Web view contains target description**
+  - [ ]* 4.2 Write property test for display window target description overlay
+    - **Property 4: Display window shows target description**
     - **Validates: Requirements 4.2**
 
   - [x] 4.3 Implement `FramePipeline` orchestrator
     - Implement camera capture with OpenCV `VideoCapture`
-    - Implement frame processing loop: capture → detect → annotate → encode JPEG
+    - Implement frame processing loop in main thread: capture → detect → annotate → display via `DisplayWindow.show_frame()`
     - Implement camera retry logic (5-second intervals on failure)
-    - Implement `get_latest_frame()` for the web server to consume
-    - Wire together Detector, Annotator, and Web View
+    - Call `DisplayWindow.show_offline()` when camera is unavailable
+    - Check `DisplayWindow.check_quit()` each iteration for 'q' key exit
+    - Wire together Detector, Annotator, and DisplayWindow
     - _Requirements: 1.1, 1.2, 1.3, 1.4_
 
   - [x] 4.4 Implement `main.py` entry point
     - Parse CLI arguments for config file path
     - Load config (or use defaults)
-    - Initialize pipeline and start Flask server
-    - Handle graceful shutdown on SIGINT/SIGTERM
+    - Initialize DisplayWindow and FramePipeline
+    - Run the pipeline's main loop directly (main thread, required by OpenCV GUI)
+    - Handle graceful shutdown on SIGINT/SIGTERM, calling `DisplayWindow.close()`
     - _Requirements: 5.1, 5.3_
 
 - [x] 5. Checkpoint - Ensure all tests pass

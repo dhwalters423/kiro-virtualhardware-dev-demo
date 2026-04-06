@@ -2,13 +2,13 @@
 
 ## Introduction
 
-A Python-based security camera application that runs on a Raspberry Pi 4 (virtualized on ARM Virtual Hardware / Corellium, backed by AWS Graviton instances). The system captures video from a USB webcam, performs local AI inference using YOLOE (YOLO with Embeddings) to detect a specific target — a knight in armor — via text-prompted zero-shot detection. Detected knights are visually highlighted with bounding boxes on a web-based live view served from the Pi. A lightweight HTML5 test reporting dashboard runs on the developer's local machine. The system is deployed over-the-air via SSH from the Kiro development environment.
+A Python-based security camera application that runs on a Raspberry Pi 4 (virtualized on ARM Virtual Hardware / Corellium, backed by AWS Graviton instances). The system captures video from a USB webcam, performs local AI inference using YOLOE (YOLO with Embeddings) to detect a specific target — a knight in armor — via text-prompted zero-shot detection. Detected knights are visually highlighted with bounding boxes in a native OpenCV display window running on the Pi. The target description is rendered as a text overlay on the video frame. A lightweight HTML5 test reporting dashboard runs on the developer's local machine. The system is deployed over-the-air via SSH from the Kiro development environment.
 
 ## Glossary
 
 - **Detector**: The YOLOE-based component that performs text-prompted zero-shot object detection, identifying objects matching a natural language description (e.g., "knight in armor")
-- **Frame_Pipeline**: The end-to-end processing chain from frame capture through detection, annotation, and streaming
-- **Web_View**: A lightweight web server running on the Pi that serves an MJPEG stream of the annotated camera feed along with a description of the detection target
+- **Frame_Pipeline**: The end-to-end processing chain from frame capture through detection, annotation, and display
+- **Display_Window**: A native OpenCV window (using cv2.imshow) running on the Pi that shows the annotated camera feed with the target description overlaid as text on the video frame
 - **Test_Reporter**: An HTML5 application running on the developer's local machine that displays test results from the on-device test suite
 - **Deployment_Agent**: The component responsible for transferring and running the application on the Raspberry Pi over SSH
 - **Pi**: The Raspberry Pi 4 target device (virtualized on ARM Virtual Hardware / Corellium, backed by AWS Graviton)
@@ -48,17 +48,17 @@ A Python-based security camera application that runs on a Raspberry Pi 4 (virtua
 3. THE Frame_Pipeline SHALL use a distinct color (bright green) for detection bounding boxes
 4. WHEN no detections are found in a frame, THE Frame_Pipeline SHALL pass the frame through without any annotations
 
-### Requirement 4: Serve Annotated Camera Feed via Web View
+### Requirement 4: Display Annotated Camera Feed in Native Window
 
-**User Story:** As a security operator, I want to view the live annotated camera feed through a web browser, so that I can monitor the camera remotely.
+**User Story:** As a security operator, I want to view the live annotated camera feed in a native window on the Pi, so that I can monitor the camera directly without a web browser.
 
 #### Acceptance Criteria
 
-1. WHEN the application starts, THE Web_View SHALL start an HTTP server on a configurable port (default 8080)
-2. THE Web_View SHALL serve an HTML page that displays the target description (e.g., "Looking for: Knight in Armor") and an inline live camera view
-3. THE Web_View SHALL stream annotated frames as an MJPEG stream embedded in the HTML page
-4. WHILE the camera feed is active, THE Web_View SHALL update the displayed frame each time a new annotated frame is available
-5. IF no camera feed is available, THEN THE Web_View SHALL display a placeholder message indicating the camera is offline
+1. WHEN the application starts, THE Display_Window SHALL open a native OpenCV window (using cv2.imshow) titled "Pi Security Cam"
+2. THE Display_Window SHALL render the target description as a text overlay on each video frame (e.g., "Looking for: Knight in Armor") using cv2.putText
+3. WHILE the camera feed is active, THE Display_Window SHALL display each new annotated frame in the window as it becomes available
+4. THE Display_Window SHALL process keyboard input via cv2.waitKey, exiting the application when the user presses the "q" key
+5. IF no camera feed is available, THEN THE Display_Window SHALL display a black placeholder frame with text indicating the camera is offline
 
 ### Requirement 5: Configure the Application
 
@@ -67,7 +67,7 @@ A Python-based security camera application that runs on a Raspberry Pi 4 (virtua
 #### Acceptance Criteria
 
 1. WHEN the application starts, THE Frame_Pipeline SHALL load configuration from a JSON file specified via command-line argument
-2. THE Frame_Pipeline SHALL support configuration of: camera device index, detection confidence threshold, web server port, target description text prompt, and YOLOE model path
+2. THE Frame_Pipeline SHALL support configuration of: camera device index, detection confidence threshold, target description text prompt, and YOLOE model path
 3. IF a configuration file is not provided, THEN THE Frame_Pipeline SHALL use default values for all parameters
 4. WHEN a configuration file contains invalid values, THE Frame_Pipeline SHALL log a validation error and exit with a non-zero status code
 

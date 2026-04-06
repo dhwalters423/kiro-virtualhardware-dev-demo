@@ -4,3 +4,4 @@ __pycache__/
 results.json
 .vscode/
 .pytest_cache/
+pi-security-cam-venv/
